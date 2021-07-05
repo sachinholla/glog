@@ -435,8 +435,6 @@ func init() {
 	flag.BoolVar(&logging.alsoToSyslog, "alsologtosyslog", false, "log to syslog")
 	flag.Var(&logging.syslogThreshold, "syslogthreshold", "logs at or above this threshold go to syslog")
 
-	logging.logThreshold = infoLog
-
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
 	// Default syslogThreshold is ERROR.
