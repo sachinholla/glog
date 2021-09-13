@@ -413,3 +413,27 @@ func BenchmarkHeader(b *testing.B) {
 		logging.putBuffer(buf)
 	}
 }
+
+func TestFormat(t *testing.T) {
+	buf1 := logging.formatHeader(infoLog, "test.go", 100)
+	defer logging.putBuffer(buf1)
+	buf2 := logging.formatHeader2(infoLog, "test.go", 100)
+	defer logging.putBuffer(buf2)
+
+	t.Log("old format: ", buf1)
+	t.Log("new format: ", buf2)
+}
+
+func BenchmarkFormat_old(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		buf := logging.formatHeader(infoLog, "test.go", 100)
+		logging.putBuffer(buf)
+	}
+}
+
+func BenchmarkFormat_new(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		buf := logging.formatHeader2(infoLog, "test.go", 100)
+		logging.putBuffer(buf)
+	}
+}

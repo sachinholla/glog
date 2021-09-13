@@ -632,6 +632,73 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	return buf
 }
 
+// formatHeader2 formats a log header using the provided file name and line number.
+func (l *loggingT) formatHeader2(s severity, file string, line int) *buffer {
+	now := time.Now().In(loc_tz)
+	offset := (now.Format(time.RFC3339))[19:]
+	if offset == "Z" {
+		offset = "+00:00"
+	}
+	if line < 0 {
+		line = 0 // not a real line number, but acceptable to someDigits
+	}
+	if s > fatalLog {
+		s = infoLog // for safety.
+	}
+	buf := l.getBuffer()
+
+	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
+	// It's worth about 3X. Fprintf is hard.
+	year, month, day := now.Date()
+	hour, minute, second := now.Clock()
+	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
+	buf.tmp[0] = severityChar[s]
+	var mon_full = time.Month(month).String()
+	buf.tmp[1] = mon_full[0]
+	buf.tmp[2] = mon_full[1]
+	buf.tmp[3] = mon_full[2]
+	buf.tmp[4] = ' '
+	buf.twoDigits(5, day)
+	buf.tmp[7] = ' '
+	buf.twoDigits(8, hour)
+	buf.tmp[10] = ':'
+	buf.twoDigits(11, minute)
+	buf.tmp[13] = ':'
+	buf.twoDigits(14, second)
+	buf.tmp[16] = '.'
+	buf.nDigits(6, 17, now.Nanosecond()/1000, '0')
+	offsetLen := len(offset)
+	for i := 0; i < offsetLen; i++ {
+		buf.tmp[23+i] = offset[i]
+	}
+	buf.tmp[23+offsetLen] = ' '
+	buf.nDigits(4, 24+offsetLen, year, ' ')
+	buf.tmp[28+offsetLen] = ' '
+	buf.nDigits(7, 29+offsetLen, pid, ' ') // TODO: should be TID
+	buf.tmp[36+offsetLen] = ' '
+	buf.Write(buf.tmp[:37+offsetLen])
+	buf.WriteString(file)
+	buf.tmp[0] = ':'
+	n := buf.someDigits(1, line)
+	buf.tmp[n+1] = ']'
+	buf.tmp[n+2] = ' '
+	buf.Write(buf.tmp[:n+3])
+	return buf
+}
+
+// local timezone
+var loc_tz, _ = time.LoadLocation("UTC")
+
+func SetLocalTimezone(tz string) {
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		msg := fmt.Sprintf("unable to get location for timezone: %s\n", tz)
+		os.Stderr.WriteString(msg)
+	} else {
+		loc_tz = loc
+	}
+}
+
 // Some custom tiny helper functions to print the log header efficiently.
 
 const digits = "0123456789"
