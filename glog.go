@@ -41,16 +41,11 @@
 //
 //	-logtostderr=false
 //		Logs are written to standard error instead of to files.
-//	-logtostdout=false
-//		Logs are written to standard output instead of to files.
+//	-logtosyslog=false
+//		Logs are written to the syslog instead of to files.
 //	-alsologtostderr=false
 //		Logs are written to standard error as well as to files.
-//	-alsologtosyslog=false
-//		Logs are written to syslog as well as to other destinations
 //	-stderrthreshold=ERROR
-//		Log events at or above this severity are logged to standard
-//		error as well as to files.
-//	-syslogthreshold=ERROR
 //		Log events at or above this severity are logged to standard
 //		error as well as to files.
 //	-log_dir=""
@@ -424,6 +419,7 @@ type flushSyncWriter interface {
 }
 
 func init() {
+	flag.BoolVar(&logging.toSyslog, "logtosyslog", false, "log to syslog instead of files")
 	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
 	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
 	flag.Var(&logging.verbosity, "v", "log level for V logs")
@@ -434,11 +430,15 @@ func init() {
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
-	logging.connectedToSyslog = false
-	// Setup Syslog
-	SetupSysLog()
 
 	logging.setVState(0, nil, false)
+
+	// Early init by parsing the flags without calling flag.Parse()
+	initFromArgv()
+	if logging.toSyslog {
+		SetupSysLog()
+	}
+
 	go logging.flushDaemon()
 }
 
@@ -454,7 +454,7 @@ type loggingT struct {
 	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
 	toStderr     bool // The -logtostderr flag.
 	alsoToStderr bool // The -alsologtostderr flag.
-	toSyslog bool // The -logtosyslog flag.
+	toSyslog     bool // The -logtosyslog flag.
 	toStdout     bool // The -tostdout
 
 	// logThreshold controls which logs will be written. Logs with
@@ -462,9 +462,12 @@ type loggingT struct {
 	logThreshold severity // The -logthreshold flag.
 
 	// Level flag. Handled atomically.
-	stderrThreshold   severity       // The -stderrthreshold flag.
+	stderrThreshold severity // The -stderrthreshold flag.
+
+	// syslog
 	connectedToSyslog bool           // Flag which stores syslog connection status
 	sysLogWriter      *syslog.Writer // Writer to syslog
+	sysLogError       error          // error returned by the last syslog.Dial() call
 
 	// freeList is a list of byte buffers, maintained under freeListMu.
 	freeList *buffer
@@ -595,9 +598,9 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 		}
 	}
 	if l.toSyslog {
-	    return l.formatHeaderNoTimestamp(s, file, line), file, line
+		return l.formatHeaderNoTimestamp(s, file, line), file, line
 	} else {
-	    return l.formatHeader(s, file, line), file, line
+		return l.formatHeader(s, file, line), file, line
 	}
 }
 
@@ -605,7 +608,7 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 func (l *loggingT) formatHeaderNoTimestamp(s severity, file string, line int) *buffer {
 	buf := l.getBuffer()
 	buf.tmp[0] = '['
-	buf.Write( buf.tmp[:1])
+	buf.Write(buf.tmp[:1])
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
@@ -787,7 +790,7 @@ func (l *loggingT) output(s severity, buf *buffer, file string,
 			// send Info message as Debug
 			sendToSyslog(debugSyslog, msg, true)
 		}
-	} else if !flag.Parsed() || l.toStderr {
+	} else if l.toStderr {
 		os.Stderr.Write(data)
 	} else {
 		if alsoToStderr || l.alsoToStderr || s >= l.stderrThreshold.get() {
@@ -1298,12 +1301,14 @@ func SetupSysLog() {
 	procName := filepath.Base(os.Args[0])
 	sysLogL, err := syslog.Dial("", "",
 		syslog.LOG_WARNING|syslog.LOG_USER, procName)
-	if err != nil {
-		os.Stderr.WriteString("Unable to connect to syslogD\n")
-	} else {
+	if err == nil {
 		logging.connectedToSyslog = true
 		logging.sysLogWriter = sysLogL
+	} else if logging.sysLogError == nil {
+		// Only 1st error is printed to stderr -- to avoid flooding
+		os.Stderr.WriteString("Unable to connect to syslog; error: " + err.Error() + "\n")
 	}
+	logging.sysLogError = err
 }
 
 // IsConnectedToSyslogD returns Syslog connection status
@@ -1332,18 +1337,16 @@ func sendToSyslog(sev syslogSeverity, msg string, redial bool) {
 		} else if sev == warningSyslog {
 			err = logging.sysLogWriter.Warning(msg)
 		} else {
-			msg = fmt.Sprintf("Invalid severity: %d\n", sev)
-			os.Stderr.WriteString(msg)
-			err = nil
+			panic("Invalid syslog severity: " + strconv.Itoa(int(sev)))
 		}
 		if err != nil {
 			//if syslog server is not avaialble then write to Stderr
 			os.Stderr.WriteString(msg)
 		}
+	} else if redial {
+		SetupSysLog()
+		sendToSyslog(sev, msg, false)
 	} else {
-		if redial {
-			SetupSysLog()
-			sendToSyslog(sev, msg, false)
-		}
+		os.Stderr.WriteString(msg)
 	}
 }
