@@ -1,7 +1,7 @@
-// +build glog_defaults
+//go:build glog_defaults
 
 package glog
 
 func init() {
-	logging.alsoToSyslog = true
+	logging.toSyslog = true
 }

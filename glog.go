@@ -431,14 +431,9 @@ func init() {
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
 	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
-	flag.BoolVar(&logging.toStdout, "logtostdout", false, "log to standard output instead of files")
-	flag.BoolVar(&logging.alsoToSyslog, "alsologtosyslog", false, "log to syslog")
-	flag.Var(&logging.syslogThreshold, "syslogthreshold", "logs at or above this threshold go to syslog")
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
-	// Default syslogThreshold is ERROR.
-	logging.syslogThreshold = errorLog
 	logging.connectedToSyslog = false
 	// Setup Syslog
 	SetupSysLog()
@@ -459,7 +454,7 @@ type loggingT struct {
 	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
 	toStderr     bool // The -logtostderr flag.
 	alsoToStderr bool // The -alsologtostderr flag.
-	alsoToSyslog bool // The -alsologtosyslog flag.
+	toSyslog bool // The -logtosyslog flag.
 	toStdout     bool // The -tostdout
 
 	// logThreshold controls which logs will be written. Logs with
@@ -468,7 +463,6 @@ type loggingT struct {
 
 	// Level flag. Handled atomically.
 	stderrThreshold   severity       // The -stderrthreshold flag.
-	syslogThreshold   severity       // The -syslogthreshold flag.
 	connectedToSyslog bool           // Flag which stores syslog connection status
 	sysLogWriter      *syslog.Writer // Writer to syslog
 
@@ -559,7 +553,18 @@ func (l *loggingT) putBuffer(b *buffer) {
 	l.freeListMu.Unlock()
 }
 
-var timeNow = time.Now // Stubbed out for testing.
+// local timezone
+var loc_tz, _ = time.LoadLocation("UTC")
+
+func SetLocalTimezone(tz string) {
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		msg := fmt.Sprintf("unable to get location for timezone: %s\n", tz)
+		os.Stderr.WriteString(msg)
+	} else {
+		loc_tz = loc
+	}
+}
 
 /*
 header formats a log header as defined by the C++ implementation.
@@ -589,12 +594,34 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 			file = file[slash+1:]
 		}
 	}
-	return l.formatHeader(s, file, line), file, line
+	if l.toSyslog {
+	    return l.formatHeaderNoTimestamp(s, file, line), file, line
+	} else {
+	    return l.formatHeader(s, file, line), file, line
+	}
+}
+
+// formatHeader formats a log header using the provided file name and line number.
+func (l *loggingT) formatHeaderNoTimestamp(s severity, file string, line int) *buffer {
+	buf := l.getBuffer()
+	buf.tmp[0] = '['
+	buf.Write( buf.tmp[:1])
+	buf.WriteString(file)
+	buf.tmp[0] = ':'
+	n := buf.someDigits(1, line)
+	buf.tmp[n+1] = ']'
+	buf.tmp[n+2] = ' '
+	buf.Write(buf.tmp[:n+3])
+	return buf
 }
 
 // formatHeader formats a log header using the provided file name and line number.
 func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
-	now := timeNow()
+	now := time.Now().In(loc_tz)
+	offset := (now.Format(time.RFC3339))[19:]
+	if offset == "Z" {
+		offset = "+00:00"
+	}
 	if line < 0 {
 		line = 0 // not a real line number, but acceptable to someDigits
 	}
@@ -605,24 +632,34 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 
 	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
 	// It's worth about 3X. Fprintf is hard.
-	_, month, day := now.Date()
+	year, month, day := now.Date()
 	hour, minute, second := now.Clock()
 	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
 	buf.tmp[0] = severityChar[s]
-	buf.twoDigits(1, int(month))
-	buf.twoDigits(3, day)
-	buf.tmp[5] = ' '
-	buf.twoDigits(6, hour)
-	buf.tmp[8] = ':'
-	buf.twoDigits(9, minute)
-	buf.tmp[11] = ':'
-	buf.twoDigits(12, second)
-	buf.tmp[14] = '.'
-	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
-	buf.tmp[21] = ' '
-	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
-	buf.tmp[29] = ' '
-	buf.Write(buf.tmp[:30])
+	var mon_full = time.Month(month).String()
+	buf.tmp[1] = mon_full[0]
+	buf.tmp[2] = mon_full[1]
+	buf.tmp[3] = mon_full[2]
+	buf.tmp[4] = ' '
+	buf.twoDigits(5, day)
+	buf.tmp[7] = ' '
+	buf.twoDigits(8, hour)
+	buf.tmp[10] = ':'
+	buf.twoDigits(11, minute)
+	buf.tmp[13] = ':'
+	buf.twoDigits(14, second)
+	buf.tmp[16] = '.'
+	buf.nDigits(6, 17, now.Nanosecond()/1000, '0')
+	offsetLen := len(offset)
+	for i := 0; i < offsetLen; i++ {
+		buf.tmp[23+i] = offset[i]
+	}
+	buf.tmp[23+offsetLen] = ' '
+	buf.nDigits(4, 24+offsetLen, year, ' ')
+	buf.tmp[28+offsetLen] = ' '
+	buf.nDigits(7, 29+offsetLen, pid, ' ') // TODO: should be TID
+	buf.tmp[36+offsetLen] = ' '
+	buf.Write(buf.tmp[:37+offsetLen])
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
@@ -735,11 +772,22 @@ func (l *loggingT) output(s severity, buf *buffer, file string,
 		}
 	}
 	data := buf.Bytes()
-	if !flag.Parsed() || l.toStdout {
-		//os.Stderr.Write([]byte("ERROR: logging before flag.Parse: "))
-		//os.Stderr.Write(data)
-		os.Stdout.Write(data)
-	} else if l.toStderr {
+	if l.toSyslog {
+		msg := string(data)
+		//msg = addFileLineToMessage(file, line, msg)
+		switch s {
+		case fatalLog:
+			sendToSyslog(critSyslog, msg, true)
+		case errorLog:
+			sendToSyslog(errSyslog, msg, true)
+		case warningLog:
+			// send warning message as Info
+			sendToSyslog(infoSyslog, msg, true)
+		case infoLog:
+			// send Info message as Debug
+			sendToSyslog(debugSyslog, msg, true)
+		}
+	} else if !flag.Parsed() || l.toStderr {
 		os.Stderr.Write(data)
 	} else {
 		if alsoToStderr || l.alsoToStderr || s >= l.stderrThreshold.get() {
@@ -765,25 +813,6 @@ func (l *loggingT) output(s severity, buf *buffer, file string,
 			l.file[infoLog].Write(data)
 		}
 	}
-	if l.alsoToSyslog && s >= l.syslogThreshold.get() {
-		msg := ""
-		if format != nil {
-			msg = fmt.Sprintf(format.(string), args...)
-		} else {
-			msg = fmt.Sprint(args...)
-		}
-		msg = addFileLineToMessage(file, line, msg)
-		switch s {
-		case fatalLog:
-			sendToSyslog(critSyslog, msg)
-		case errorLog:
-			sendToSyslog(errSyslog, msg)
-		case warningLog:
-			sendToSyslog(warningSyslog, msg)
-		case infoLog:
-			sendToSyslog(infoSyslog, msg)
-		}
-	}
 	if s == fatalLog {
 		// If we got here via Exit rather than Fatal, print no stacks.
 		if atomic.LoadUint32(&fatalNoStacks) > 0 {
@@ -795,10 +824,8 @@ func (l *loggingT) output(s severity, buf *buffer, file string,
 		// First, make sure we see the trace for the current goroutine on standard error.
 		// If -logtostderr has been specified, the loop below will do that anyway
 		// as the first stack in the full dump.
-		if l.toStdout {
-			os.Stdout.Write(stacks(true))
-		} else if !l.toStderr {
-			os.Stderr.Write(stacks(false))
+		if l.toStderr {
+			os.Stderr.Write(stacks(true))
 		}
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
@@ -1268,8 +1295,9 @@ func addFileLineToMessage(file string, line int, msg string) string {
 // SetupSysLog connects to local rsyslogd
 func SetupSysLog() {
 	// Connect to syslog
+	procName := filepath.Base(os.Args[0])
 	sysLogL, err := syslog.Dial("", "",
-		syslog.LOG_WARNING|syslog.LOG_USER, "")
+		syslog.LOG_WARNING|syslog.LOG_USER, procName)
 	if err != nil {
 		os.Stderr.WriteString("Unable to connect to syslogD\n")
 	} else {
@@ -1284,31 +1312,38 @@ func IsConnectedToSyslogD() bool {
 }
 
 // sendToSyslog sends a syslog message
-func sendToSyslog(sev syslogSeverity, msg string) {
+func sendToSyslog(sev syslogSeverity, msg string, redial bool) {
 	if IsConnectedToSyslogD() {
+		var err error
 		if sev == alertSyslog {
-			logging.sysLogWriter.Alert(msg)
+			err = logging.sysLogWriter.Alert(msg)
 		} else if sev == critSyslog {
-			logging.sysLogWriter.Crit(msg)
+			err = logging.sysLogWriter.Crit(msg)
 		} else if sev == debugSyslog {
-			logging.sysLogWriter.Debug(msg)
+			err = logging.sysLogWriter.Debug(msg)
 		} else if sev == emergSyslog {
-			logging.sysLogWriter.Emerg(msg)
+			err = logging.sysLogWriter.Emerg(msg)
 		} else if sev == errSyslog {
-			logging.sysLogWriter.Err(msg)
+			err = logging.sysLogWriter.Err(msg)
 		} else if sev == infoSyslog {
-			logging.sysLogWriter.Info(msg)
+			err = logging.sysLogWriter.Info(msg)
 		} else if sev == noticeSyslog {
-			logging.sysLogWriter.Notice(msg)
+			err = logging.sysLogWriter.Notice(msg)
 		} else if sev == warningSyslog {
-			logging.sysLogWriter.Warning(msg)
+			err = logging.sysLogWriter.Warning(msg)
 		} else {
-			msg = fmt.Sprintf("Invalid severity: %d, Message: %s\n", sev, msg)
+			msg = fmt.Sprintf("Invalid severity: %d\n", sev)
+			os.Stderr.WriteString(msg)
+			err = nil
+		}
+		if err != nil {
+			//if syslog server is not avaialble then write to Stderr
 			os.Stderr.WriteString(msg)
 		}
 	} else {
-		// send it to stdout instead
-		os.Stdout.WriteString(msg)
-		os.Stdout.WriteString("\n")
+		if redial {
+			SetupSysLog()
+			sendToSyslog(sev, msg, false)
+		}
 	}
 }
